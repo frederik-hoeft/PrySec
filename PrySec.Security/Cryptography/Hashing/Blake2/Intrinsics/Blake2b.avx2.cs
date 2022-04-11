@@ -55,45 +55,42 @@ public unsafe partial class Blake2b
 
             ulong* message = (ulong*)state->Input;
 
+            Vector256<ulong> m0 = Avx.LoadDquVector256(message);
+            Vector256<ulong> m1 = Avx.LoadDquVector256(message + 4);
+            Vector256<ulong> m2 = Avx.LoadDquVector256(message + 8);
+            Vector256<ulong> m3 = Avx.LoadDquVector256(message + 12);
+
             int* sigma = SIGMA;
             Vector256<ulong> va = Avx.LoadDquVector256(state->Hash);
             Vector256<ulong> vb = Avx.LoadDquVector256(state->Hash + 4);
             Vector256<ulong> vc = Avx.LoadDquVector256(state->Iv);
             Vector256<ulong> vd = Avx.LoadDquVector256(state->Iv + 4);
+            Vector256<ulong> x;
+            Vector256<ulong> y;
 
             // mix state information into vd
             vd = Avx2.Xor(vd, xorMask);
 
-            for (int i = 0; i < 12; i++, sigma += 16)
+            // round 1
+            x = LoadMessage01(in m0, in m1, in m2, in m3);
+            y = LoadMessage02(in m0, in m1, in m2, in m3);
+            Mix(ref va, ref vb, ref vc, ref vd, in x, in y);
+            Diagonalize(ref va, ref vb, ref vc, ref vd);
+            x = LoadMessage03(in m0, in m1, in m2, in m3);
+            y = LoadMessage04(in m0, in m1, in m2, in m3);
+            Mix(ref va, ref vb, ref vc, ref vd, in x, in y);
+            Undiagonalize(ref va, ref vb, ref vc, ref vd);
+            sigma += 16;
+            for (int i = 1; i < 12; i++, sigma += 16)
             {
-                //     va  vb  vc  vd   x       y
-                // Mix(V0, V4, V8,  V12, m[S0], m[S1])
-                // Mix(V1, V5, V9, V13, m[S2], m[S3])
-                // Mix(V2, V6, V10, V14, m[S4], m[S5])
-                // Mix(V3, V7, V11, V15, m[S6], m[S7])
-
                 // load the first half of the input ...
-                Vector256<ulong> x = Vector256.Create(message[sigma[0]], message[sigma[2]], message[sigma[4]], message[sigma[6]]);
-                Vector256<ulong> y = Vector256.Create(message[sigma[1]], message[sigma[3]], message[sigma[5]], message[sigma[7]]);
+                x = Vector256.Create(message[sigma[0]], message[sigma[2]], message[sigma[4]], message[sigma[6]]);
+                y = Vector256.Create(message[sigma[1]], message[sigma[3]], message[sigma[5]], message[sigma[7]]);
 
                 // do 4 mix steps in one go
                 Mix(ref va, ref vb, ref vc, ref vd, in x, in y);
 
-                //     va  vb  vc  vd   x       y
-                // Mix(V0, V5, V10, V15, m[S8], m[S9])
-                // Mix(V1, V6, V11, V12, m[S10], m[S11])
-                // Mix(V2, V7, V8, V13, m[S12], m[S13])
-                // Mix(V3, V4, V9, V14, m[S14], m[S15])
-
-                // va stays as it is
-                // vb is rotated left by 64 bit
-                vb = AvxPrimitives.RotateLaneLeft64Bit(vb);
-
-                // in vc upper and lower 128 bit lanes are swapped
-                vc = Avx.Permute2x128(vc, vc, 1);
-
-                // vd is rotated right by 64 bit
-                vd = AvxPrimitives.RotateLaneRight64Bit(vd);
+                Diagonalize(ref va, ref vb, ref vc, ref vd);
 
                 // load the remaining input ...
                 x = Vector256.Create(message[sigma[8]], message[sigma[10]], message[sigma[12]], message[sigma[14]]);
@@ -101,17 +98,7 @@ public unsafe partial class Blake2b
 
                 // do 4 mix steps in one go
                 Mix(ref va, ref vb, ref vc, ref vd, in x, in y);
-
-                // now reverse the vector element permutations and store the result in the ongoing work vectors
-                // va stays as it is
-                // vb is rotated right by 64 bit
-                vb = AvxPrimitives.RotateLaneRight64Bit(vb);
-
-                // in vc upper and lower 128 bit lanes are swapped
-                vc = Avx.Permute2x128(vc, vc, 1);
-
-                // vd is rotated left by 64 bit
-                vd = AvxPrimitives.RotateLaneLeft64Bit(vd);
+                Undiagonalize(ref va, ref vb, ref vc, ref vd);
             }
             // Mix the upper and lower halves of V into ongoing state vector h
             Vector256<ulong> h0 = Avx.LoadDquVector256(state->Hash);
@@ -141,6 +128,55 @@ public unsafe partial class Blake2b
             // no input
             vc = Avx2.Add(vc, vd);
             vb = RotateRight(Avx2.Xor(vb, vc), 63);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void Diagonalize(ref Vector256<ulong> va, ref Vector256<ulong> vb, ref Vector256<ulong> vc, ref Vector256<ulong> vd)
+        {
+            // va stays as it is
+            // vb is rotated left by 64 bit
+            vb = AvxPrimitives.RotateLaneLeft64Bit(vb);
+
+            // in vc upper and lower 128 bit lanes are swapped
+            vc = Avx.Permute2x128(vc, vc, 1);
+
+            // vd is rotated right by 64 bit
+            vd = AvxPrimitives.RotateLaneRight64Bit(vd);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void Undiagonalize(ref Vector256<ulong> va, ref Vector256<ulong> vb, ref Vector256<ulong> vc, ref Vector256<ulong> vd)
+        {
+            // now reverse the vector element permutations and store the result in the ongoing work vectors
+            // va stays as it is
+            // vb is rotated right by 64 bit
+            vb = AvxPrimitives.RotateLaneRight64Bit(vb);
+
+            // in vc upper and lower 128 bit lanes are swapped
+            vc = Avx.Permute2x128(vc, vc, 1);
+
+            // vd is rotated left by 64 bit
+            vd = AvxPrimitives.RotateLaneLeft64Bit(vd);
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector256<ulong> LoadMessage01(in Vector256<ulong> m0, in Vector256<ulong> m1, in Vector256<ulong> m2, in Vector256<ulong> m3)
+        {
+            return AvxPrimitives.SwapMiddleX64(Avx2.UnpackLow(m0, m1));
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector256<ulong> LoadMessage02(in Vector256<ulong> m0, in Vector256<ulong> m1, in Vector256<ulong> m2, in Vector256<ulong> m3)
+        {
+            return AvxPrimitives.SwapMiddleX64(Avx2.UnpackHigh(m0, m1));
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector256<ulong> LoadMessage03(in Vector256<ulong> m0, in Vector256<ulong> m1, in Vector256<ulong> m2, in Vector256<ulong> m3)
+        {
+            return AvxPrimitives.SwapMiddleX64(Avx2.UnpackLow(m2, m3));
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static Vector256<ulong> LoadMessage04(in Vector256<ulong> m0, in Vector256<ulong> m1, in Vector256<ulong> m2, in Vector256<ulong> m3)
+        {
+            return AvxPrimitives.SwapMiddleX64(Avx2.UnpackHigh(m2, m3));
         }
 
         // ROTR(x,n) (((x) >> (n)) | ((x) << ((sizeof(x) * 8) - (n))))
